@@ -140,6 +140,13 @@ public:
      */
     int setMessageHandler(const char* topicFilter, messageHandler mh);
 
+    /** Set a message handling callback.  This can be used outside of the the subscribe method.
+     *  @param topicFilter - a topic pattern which can include wildcards
+     *  @param mh - pointer to the callback function. If 0, removes the callback if any
+     */
+    template<class T>
+    int setMessageHandler(const char* topicFilter, T *object, void (T::*object_method)(MessageData&));
+
     /** MQTT Connect - send an MQTT connect packet down the network and wait for a Connack
      *  The nework object must be connected to the network endpoint before calling this
      *  Default connect options are used
@@ -249,6 +256,34 @@ private:
     int deliverMessage(MQTTString& topicName, Message& message);
     bool isTopicMatched(char* topicFilter, MQTTString& topicName);
 
+    struct MessageHandler;
+    MessageHandler* getMHforTopic(const char* topicFilter)
+    {
+        int lastFreeSlotI = -1;
+        // first check for an existing matching slot
+        for (int i = 0; i < MAX_MESSAGE_HANDLERS; ++i)
+        {
+            if (messageHandlers[i].topicFilter != 0)
+            {
+                if(strcmp(messageHandlers[i].topicFilter, topicFilter) == 0)
+                {
+                    return &(messageHandlers[i]);
+                }
+            }
+            else
+            {
+                lastFreeSlotI = i;
+            }
+        }
+
+        if(lastFreeSlotI > 0)
+        {
+            return &(messageHandlers[lastFreeSlotI]); 
+        }
+
+        return nullptr;
+    }
+
     Network& ipstack;
     unsigned long command_timeout_ms;
 
@@ -262,12 +297,12 @@ private:
 
     PacketId packetid;
 
-    struct MessageHandlers
+    struct MessageHandler
     {
         const char* topicFilter;
         FP<void, MessageData&> fp;
     } messageHandlers[MAX_MESSAGE_HANDLERS];      // Message handlers are indexed by subscription topic
-
+    
     FP<void, MessageData&> defaultMessageHandler;
 
     bool isconnected;
@@ -805,49 +840,49 @@ int MQTT::Client<Network, Timer, MAX_MQTT_PACKET_SIZE, b>::connect()
     return connect(default_options);
 }
 
-
 template<class Network, class Timer, int MAX_MQTT_PACKET_SIZE, int MAX_MESSAGE_HANDLERS>
 int MQTT::Client<Network, Timer, MAX_MQTT_PACKET_SIZE, MAX_MESSAGE_HANDLERS>::setMessageHandler(const char* topicFilter, messageHandler messageHandler)
 {
     int rc = FAILURE;
-    int i = -1;
 
-    // first check for an existing matching slot
-    for (i = 0; i < MAX_MESSAGE_HANDLERS; ++i)
+    auto foundMH = getMHforTopic(topicFilter);
+
+    if(foundMH)
     {
-        if (messageHandlers[i].topicFilter != 0 && strcmp(messageHandlers[i].topicFilter, topicFilter) == 0)
+        if (messageHandler == 0) // remove existing
         {
-            if (messageHandler == 0) // remove existing
-            {
-                messageHandlers[i].topicFilter = 0;
-                messageHandlers[i].fp.detach();
-            }
-            rc = SUCCESS; // return i when adding new subscription
-            break;
+            foundMH->topicFilter = 0;
+            foundMH->fp.detach();
         }
-    }
-    // if no existing, look for empty slot (unless we are removing)
-    if (messageHandler != 0) {
-        if (rc == FAILURE)
+        else
         {
-            for (i = 0; i < MAX_MESSAGE_HANDLERS; ++i)
-            {
-                if (messageHandlers[i].topicFilter == 0)
-                {
-                    rc = SUCCESS;
-                    break;
-                }
-            }
+            foundMH->topicFilter = topicFilter;
+            foundMH->fp.attach(messageHandler);
         }
-        if (i < MAX_MESSAGE_HANDLERS)
-        {
-            messageHandlers[i].topicFilter = topicFilter;
-            messageHandlers[i].fp.attach(messageHandler);
-        }
+        rc = SUCCESS;
     }
     return rc;
 }
 
+template<class Network, class Timer, int MAX_MQTT_PACKET_SIZE, int MAX_MESSAGE_HANDLERS>
+template<class T>
+int MQTT::Client<Network, Timer, MAX_MQTT_PACKET_SIZE, MAX_MESSAGE_HANDLERS>::setMessageHandler(const char* topicFilter, T *object, void (T::*object_method)(MessageData&))
+{
+    int rc = FAILURE;
+
+    auto foundMH = getMHforTopic(topicFilter);
+
+    if(foundMH)
+    {
+        if (object && object_method)
+        {
+            foundMH->topicFilter = topicFilter;
+            foundMH->fp.attach(object, object_method);
+            rc = SUCCESS;
+        }
+    }
+    return rc;
+}
 
 template<class Network, class Timer, int MAX_MQTT_PACKET_SIZE, int MAX_MESSAGE_HANDLERS>
 int MQTT::Client<Network, Timer, MAX_MQTT_PACKET_SIZE, MAX_MESSAGE_HANDLERS>::subscribe(const char* topicFilter,
